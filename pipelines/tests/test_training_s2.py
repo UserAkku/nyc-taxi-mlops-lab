@@ -44,7 +44,7 @@ def test_unload_doubles_the_quotes_inside_the_query():
 
 # --- the gate ---
 
-# decision 008's numbers are set in the test, not assumed: margin 5%, 100 ms
+# the gate function takes the rule as arguments; these are its edge cases (margin 5%, 100 ms here)
 def test_the_gate_needs_the_margin_and_the_latency_budget():
     assert promotion_verdict(9.0, 5.0, 10.0, 0.05, 100) == (True, [])
     ok, why = promotion_verdict(9.6, 5.0, 10.0, 0.05, 100)  # 4% better is not enough for 5%
@@ -83,8 +83,10 @@ def beats_champion(result):
     return ev
 
 
-def test_while_the_rule_is_undecided_a_model_is_registered_and_measured_but_never_the_challenger(stack):
+def test_while_the_rule_is_undecided_a_model_is_registered_and_measured_but_never_the_challenger(stack, monkeypatch):
     resources, client = stack
+    monkeypatch.setattr(training, "PROMOTION_MARGIN", None)
+    monkeypatch.setattr(training, "LATENCY_BUDGET_MS", None)
     result = run(resources)
     assert not result.success and not beats_champion(result).passed
     assert "isn't decided" in beats_champion(result).description
@@ -96,7 +98,7 @@ def test_while_the_rule_is_undecided_a_model_is_registered_and_measured_but_neve
 
 def test_a_model_that_beats_the_baseline_by_the_margin_becomes_the_challenger_with_every_tag(stack, monkeypatch):
     resources, client = stack
-    monkeypatch.setattr(training, "PROMOTION_MARGIN", 0.05)
+    monkeypatch.setattr(training, "PROMOTION_MARGIN", 0.02)
     monkeypatch.setattr(training, "LATENCY_BUDGET_MS", 5000.0)
     result = run(resources)
     assert result.success and beats_champion(result).passed
@@ -119,7 +121,7 @@ def test_a_model_that_beats_the_baseline_by_the_margin_becomes_the_challenger_wi
 
 def test_the_pipeline_never_sets_champion(stack, monkeypatch):
     resources, client = stack
-    monkeypatch.setattr(training, "PROMOTION_MARGIN", 0.05)
+    monkeypatch.setattr(training, "PROMOTION_MARGIN", 0.02)
     monkeypatch.setattr(training, "LATENCY_BUDGET_MS", 5000.0)
     run(resources)
     with pytest.raises(Exception, match="alias"):
@@ -128,7 +130,7 @@ def test_the_pipeline_never_sets_champion(stack, monkeypatch):
 
 def test_a_retrain_that_only_ties_the_champion_does_not_move_the_challenger(stack, monkeypatch):
     resources, client = stack
-    monkeypatch.setattr(training, "PROMOTION_MARGIN", 0.05)
+    monkeypatch.setattr(training, "PROMOTION_MARGIN", 0.02)
     monkeypatch.setattr(training, "LATENCY_BUDGET_MS", 5000.0)
     assert run(resources).success
     client.set_registered_model_alias("trip-duration", "champion", "1")  # what S3's approved promotion does
@@ -140,8 +142,20 @@ def test_a_retrain_that_only_ties_the_champion_does_not_move_the_challenger(stac
     assert str(client.get_model_version_by_alias("trip-duration", "champion").version) == "1"
 
 
-def test_challenger_on_its_own_cannot_skip_the_gate(stack):
+def test_the_decided_rule_is_what_decision_008_says():
+    assert training.PROMOTION_MARGIN == 0.02 and training.LATENCY_BUDGET_MS == 25.0
+
+
+def test_the_real_first_run_numbers_pass_the_decided_rule():
+    """v2 3.637 vs the v1 baseline 3.956, p95 5.4 ms (measured on the platform host)."""
+    assert promotion_verdict(3.6365, 5.39, 3.9563, training.PROMOTION_MARGIN, training.LATENCY_BUDGET_MS) == (True, [])
+    ok, _ = promotion_verdict(3.90, 5.39, 3.9563, training.PROMOTION_MARGIN, training.LATENCY_BUDGET_MS)  # 1.4% better
+    assert not ok
+
+
+def test_challenger_on_its_own_cannot_skip_the_gate(stack, monkeypatch):
     resources, client = stack
+    monkeypatch.setattr(training, "PROMOTION_MARGIN", None)
     bad = {"name": "trip-duration", "version": "1", "metrics": {"mae_min": 9.0, "p95_latency_ms": 1.0, "champion_mae_min": 10.0}}
     with pytest.raises(dg.Failure, match="not promoted"):
         challenger(bad, resources["tracking"])  # undecided rule: refused although 9 < 10

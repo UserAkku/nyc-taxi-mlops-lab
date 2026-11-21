@@ -14,8 +14,9 @@ Decision points: what stays in the notebook; the promotion metric and margin; th
 Decisions (decisions/007, 008, 009):
 - Window: the WINDOW_MONTHS months before the holdout train; the holdout is the latest month in
   staging.trip_features (2024-04, trained on 2024-01..03). The holdout is always after the window.
-- Promotion: see PROMOTION_MARGIN and LATENCY_BUDGET_MS. Until decision 008 sets them the gate fails
-  closed: eval_report still measures and logs, but nothing becomes `challenger`.
+- Promotion: a new version must beat what it is compared against on mae_min by PROMOTION_MARGIN (2%) and
+  stay within LATENCY_BUDGET_MS (25 ms p95). If either were None the gate would fail closed: eval_report
+  still measures and logs, but nothing becomes `challenger`.
 - The notebook explores; everything that registers, gates or aliases is here.
 
 Data flow: staging.trip_features --UNLOAD--> s3://<artifact bucket>/training_sets/<window>__<holdout>/
@@ -39,11 +40,13 @@ from ..resources import ArtifactBucket, MlflowTracking, RedshiftData
 WINDOW_MONTHS = 3  # decision 009: train on this many months, test on the month after
 NUM_ROUNDS = 300  # LightGBM boosting rounds (tripmodel's own defaults for everything else)
 
-# Decision 008 (promotion metric and margin). None = not decided yet: the gate refuses everything.
-# A new version must have mae_min <= champion_mae_min * (1 - PROMOTION_MARGIN) and
-# p95_latency_ms <= LATENCY_BUDGET_MS.
-PROMOTION_MARGIN: float | None = None
-LATENCY_BUDGET_MS: float | None = None
+# Decision 008 (promotion metric and margin). A new version must have
+# mae_min <= champion_mae_min * (1 - PROMOTION_MARGIN) and p95_latency_ms <= LATENCY_BUDGET_MS.
+# None would mean "not decided": the gate then refuses everything (fail closed).
+# Measured on the first run (train 2024-01..03, test 2024-04): v1 baseline 3.956 min, v2 3.637 min (8.1%
+# better), v2 p95 5.4 ms on the platform host.
+PROMOTION_MARGIN: float | None = 0.02
+LATENCY_BUDGET_MS: float | None = 25.0
 
 FEATURE_COLUMNS = "pickup_zone_id, dropoff_zone_id, pickup_hour, pickup_dow, duration_min"
 CHALLENGER = "challenger"
