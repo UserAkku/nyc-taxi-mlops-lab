@@ -1,0 +1,69 @@
+# CI (S0): `make check` on every push and pull request; on main, build the linux/arm64 app image and push
+# it to GHCR as sha-<short sha> (decisions/002-image-tag-scheme.md). cd.yaml deploys it when this succeeds.
+# GitHub-hosted runners only, and no AWS credentials: GHCR takes GITHUB_TOKEN. That's what makes it safe
+# to run on pull requests from forks.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch: # scripts/catch-up.sh re-runs CI on main to redeploy
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.2.0
+      - uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: 1.17.2
+          terraform_wrapper: false
+      - run: make check
+
+  image:
+    needs: check
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.img.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Image name and tag
+        id: img
+        run: |
+          echo "prefix=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v4.4.1
+      - uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7.4.0
+        with:
+          context: app
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.img.outputs.prefix }}/app:${{ steps.img.outputs.tag }}
+          build-args: GIT_SHA=${{ github.sha }}
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,scope=app,mode=max
+      - name: The image starts and reports its commit
+        run: |
+          image="${{ steps.img.outputs.prefix }}/app:${{ steps.img.outputs.tag }}"
+          docker run -d --name smoke -p 8000:8000 -e IMAGE_TAG="${{ steps.img.outputs.tag }}" "$image"
+          trap 'docker rm -f smoke >/dev/null' EXIT
+          curl -fsS --retry 15 --retry-all-errors --retry-delay 2 http://127.0.0.1:8000/version | tee version.json
+          jq -e --arg sha "$GITHUB_SHA" '.git_sha == $sha' version.json

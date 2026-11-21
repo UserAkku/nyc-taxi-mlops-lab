@@ -1,0 +1,84 @@
+# CD (S0): after CI succeeds on main, deploy that commit's app image (sha-<short sha>) on the app host
+# with deploy/compose.app.yaml, through its self-hosted runner (label lab-app), then smoke-test it.
+# AWS access, if a step ever needs it, comes from the host's instance profile
+# (decisions/001-runner-credentials.md); pulling from GHCR uses GITHUB_TOKEN.
+#
+# Rollback (decisions/002-image-tag-scheme.md): dispatch with an earlier tag, e.g.
+#   gh workflow run cd.yaml -f image_tag=sha-1a2b3c4
+#
+# Never triggered by a pull request: this job runs on your EC2 host. A CI run from a fork's PR (even from
+# a branch named main) also fires workflow_run, so the job checks the triggering event and repository.
+name: cd
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Image tag to deploy (sha-<7 chars>), e.g. to roll back
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-app
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       contains(fromJSON('["push", "workflow_dispatch"]'), github.event.workflow_run.event) &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_branch == 'main')
+    runs-on: [self-hosted, lab-app]
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    env:
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+      INPUT_TAG: ${{ inputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          # The deploy config of the commit CI tested (for a rollback, main's current config).
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - name: Image to deploy
+        run: |
+          if [[ -n "$HEAD_SHA" ]]; then tag="sha-${HEAD_SHA::7}"; else tag="$INPUT_TAG"; fi
+          [[ "$tag" =~ ^sha-[0-9a-f]{7}$ ]] || { echo "not a sha-<7 hex> tag: $tag" >&2; exit 1; }
+          {
+            echo "IMAGE_PREFIX=ghcr.io/${GITHUB_REPOSITORY,,}"
+            echo "IMAGE_TAG=$tag"
+          } >> "$GITHUB_ENV"
+          echo "deploying $tag"
+      - uses: docker/login-action@v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Deploy
+        run: |
+          docker compose -f deploy/compose.app.yaml pull
+          docker compose -f deploy/compose.app.yaml up -d --wait --remove-orphans
+      - name: Smoke test
+        run: |
+          curl -fsS --retry 15 --retry-all-errors --retry-delay 2 http://127.0.0.1/version | tee version.json
+          echo
+          jq -e --arg tag "$IMAGE_TAG" '.image_tag == $tag' version.json
+          if [[ -n "$HEAD_SHA" ]]; then jq -e --arg sha "$HEAD_SHA" '.git_sha == $sha' version.json; fi
+          body='{"pickup_zone_id": 132, "dropoff_zone_id": 230, "pickup_datetime": "2024-03-08T17:05:00"}'
+          curl -fsS -X POST http://127.0.0.1/predict -H 'Content-Type: application/json' -d "$body"
+          echo
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1/predict \
+            -H 'Content-Type: application/json' -d '{"pickup_zone_id": 999, "dropoff_zone_id": 230, "pickup_datetime": "2024-03-08T17:05:00"}')
+          [[ "$code" == 422 ]] || { echo "invalid zone returned $code, expected 422" >&2; exit 1; }
+      - name: Remove old images
+        if: success()
+        run: docker image prune -af --filter "until=168h"
