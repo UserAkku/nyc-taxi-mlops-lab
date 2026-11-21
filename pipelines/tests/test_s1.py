@@ -102,7 +102,7 @@ def test_the_ingest_job_runs_from_trip_files_to_the_mart(monkeypatch):
 
     job = defs.resolve_job_def("ingest_month")
     assert {k.to_user_string() for k in job.asset_layer.selected_asset_keys} == {
-        "taxi_zones", "trip_files", "raw_trips", "stg_trips", "zone_hour_stats"
+        "taxi_zones", "trip_files", "raw_trips", "stg_trips", "zone_hour_stats", "trip_features"
     }
     graph = defs.resolve_asset_graph()
     (key,) = [k for k in graph.asset_check_keys if k.name == "schema_contract"]

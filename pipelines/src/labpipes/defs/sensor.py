@@ -9,7 +9,8 @@ is new; a month whose ETag moved was replaced upstream. Either way one run is re
 (month + ETag) makes asking twice for the same file a no-op.
 
 The job also reloads taxi_zones: it's tiny, and the mart's zone names come from it, so a run never builds
-the mart on a lookup table that was never loaded.
+the mart on a lookup table that was never loaded. From S2 it also builds the month's trip_features, behind
+the blocking feature_contract check, so training always finds every landed month's inputs.
 """
 
 import json
@@ -21,8 +22,8 @@ from ..resources import DataBucket
 
 ingest_month = dg.define_asset_job(
     "ingest_month",
-    selection=dg.AssetSelection.assets("taxi_zones", "trip_files", "raw_trips", "stg_trips", "zone_hour_stats"),
-    description="One month, trip file to mart. A blocking check that fails upstream keeps the rest from running.",
+    selection=dg.AssetSelection.assets("taxi_zones", "trip_files", "raw_trips", "stg_trips", "zone_hour_stats", "trip_features"),
+    description="One month, trip file to mart and to the model's features (S2). A blocking check that fails upstream keeps the rest from running.",
 )
 
 
